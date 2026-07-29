@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0e14" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>BTC / XRP Prediction Dashboard</title>
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/icon-192.png" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div id="rotate-notice">
+    <div class="rotate-icon">⟳</div>
+    <p>Rotate the tablet to landscape</p>
+  </div>
+
+  <div id="app">
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">◈</span>
+        <span class="brand-name">CryptoPredict</span>
+      </div>
+      <div class="topbar-right">
+        <div class="corr-pill" id="corr-pill">
+          <span class="corr-label">BTC/XRP corr</span>
+          <span class="corr-value" id="corr-value">—</span>
+        </div>
+        <div class="status-pill" id="status-pill">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">Connecting…</span>
+        </div>
+        <div class="updated-pill">
+          <span id="updated-text">—</span>
+        </div>
+        <button class="icon-btn" id="bot-btn" aria-label="Trading bot">🤖</button>
+        <button class="icon-btn" id="settings-btn" aria-label="Settings">⚙</button>
+      </div>
+    </header>
+
+    <main class="grid" id="main-grid">
+      <!-- BTC and XRP asset panels are injected here by app.js -->
+    </main>
+
+    <footer class="footer-note">
+      Heuristic technical-indicator model — not financial advice. Predictions are computed live from Coinbase market data every few seconds.
+    </footer>
+  </div>
+
+  <div id="settings-overlay" class="overlay hidden">
+    <div class="settings-card">
+      <h2>Prediction Engine Connection</h2>
+      <p class="settings-hint">Enter the address of the Prediction Engine running on your PC or VPS.</p>
+      <label for="engine-url">Engine API base URL</label>
+      <input id="engine-url" type="text" inputmode="url" placeholder="http://192.168.1.50:4000" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <label for="refresh-interval">Refresh interval (seconds)</label>
+      <input id="refresh-interval" type="number" min="5" max="10" step="1" />
+      <div class="settings-actions">
+        <button class="btn-secondary" id="settings-cancel">Cancel</button>
+        <button class="btn-primary" id="settings-save">Save &amp; Connect</button>
+      </div>
+    </div>
+  </div>
+
+  <template id="asset-panel-template">
+    <section class="asset-panel">
+      <div class="asset-head">
+        <div class="asset-id">
+          <span class="asset-symbol"></span>
+          <span class="asset-name"></span>
+        </div>
+        <div class="asset-price-block">
+          <span class="asset-price"></span>
+          <span class="asset-price-change"></span>
+        </div>
+      </div>
+
+      <div class="asset-meta">
+        <div class="meta-chip">
+          <span class="meta-label">RSI</span>
+          <span class="meta-value meta-rsi">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">MACD hist</span>
+          <span class="meta-value meta-macd">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Volatility</span>
+          <span class="meta-value meta-vol">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Order flow</span>
+          <span class="meta-value meta-flow">—</span>
+        </div>
+        <div class="meta-chip">
+          <span class="meta-label">Pattern</span>
+          <span class="meta-value meta-pattern">—</span>
+        </div>
+      </div>
+
+      <div class="windows-row">
+        <!-- window cards injected here -->
+      </div>
+    </section>
+  </template>
+
+  <template id="window-card-template">
+    <article class="window-card">
+      <div class="window-head">
+        <span class="window-label"></span>
+        <span class="window-rec"></span>
+      </div>
+
+      <div class="prob-bar">
+        <div class="prob-up"></div>
+        <div class="prob-down"></div>
+      </div>
+      <div class="prob-numbers">
+        <span class="prob-up-text"></span>
+        <span class="prob-down-text"></span>
+      </div>
+
+      <div class="window-stats">
+        <div class="stat">
+          <span class="stat-label">Target price</span>
+          <span class="stat-value predicted-price">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Confidence</span>
+          <span class="stat-value confidence-value">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Risk adj.</span>
+          <span class="stat-value risk-value">—</span>
+        </div>
+      </div>
+
+      <p class="window-explanation"></p>
+
+      <div class="track-row">
+        <div class="track-ref">
+          <span class="stat-label">Reference price</span>
+          <span class="stat-value ref-price">—</span>
+        </div>
+        <div class="track-countdown">
+          <span class="stat-label">Settles in</span>
+          <span class="stat-value countdown-value">—</span>
+        </div>
+      </div>
+
+      <div class="track-result hidden">
+        <span class="result-badge"></span>
+        <span class="result-text"></span>
+      </div>
+
+      <div class="track-accuracy">
+        <span class="accuracy-label">Track record</span>
+        <span class="accuracy-value">—</span>
+      </div>
+    </article>
+  </template>
+
+  <div id="bot-overlay" class="overlay hidden">
+    <div class="settings-card bot-card">
+      <h2>Trading Bot</h2>
+      <p class="settings-hint" id="bot-mode-line">Checking status…</p>
+
+      <div class="bot-section">
+        <h3>Live status</h3>
+        <div id="bot-status-body">
+          <p class="settings-hint">Loading…</p>
+        </div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Settings</h3>
+        <p class="settings-hint">These apply immediately — no restart needed. Trading mode (paper/live) is set on the server for safety and can't be changed here.</p>
+        <div class="bot-field-grid">
+          <label>Asset to trade
+            <select id="bot-symbol">
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+            </select>
+          </label>
+          <label>Edge threshold (%)
+            <input id="bot-edge" type="number" min="1" max="50" step="0.5" />
+          </label>
+          <label>Min confidence (%)
+            <input id="bot-confidence" type="number" min="10" max="95" step="1" />
+          </label>
+          <label>Stop-loss (¢)
+            <input id="bot-stoploss" type="number" min="1" max="99" step="1" />
+          </label>
+          <label>Contracts per trade
+            <input id="bot-contracts" type="number" min="1" max="100" step="1" />
+          </label>
+          <label>Max open positions
+            <input id="bot-maxpos" type="number" min="1" max="10" step="1" />
+          </label>
+          <label>Profit skim mode
+            <select id="bot-skim-mode">
+              <option value="fixed">Fixed amount per win</option>
+              <option value="percent">Percent of profit per win</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label>Skim amount (¢ if fixed, % if percent)
+            <input id="bot-skim-amount" type="number" min="0" step="1" />
+          </label>
+        </div>
+        <div class="settings-actions">
+          <button class="btn-secondary" id="bot-settings-refresh">Refresh</button>
+          <button class="btn-primary" id="bot-settings-save">Save settings</button>
+        </div>
+      </div>
+
+      <div class="bot-section">
+        <h3>Backtest</h3>
+        <p class="settings-hint">Replays the engine's own indicator logic against historical price data (order-book signals excluded — no historical order-book data exists).</p>
+        <div class="backtest-controls">
+          <label>Asset
+            <select id="backtest-symbol">
+              <option value="BTC">BTC</option>
+              <option value="XRP">XRP</option>
+            </select>
+          </label>
+          <label>Hours of history
+            <input id="backtest-hours" type="number" min="1" max="72" step="1" value="24" />
+          </label>
+          <button class="btn-primary" id="backtest-run">Run backtest</button>
+        </div>
+        <div id="backtest-results"></div>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn-secondary" id="bot-overlay-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

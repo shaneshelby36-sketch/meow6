@@ -1,0 +1,439 @@
+'use strict';
+
+const DEFAULTS = {
+  engineUrl: 'http://localhost:4000',
+  refreshSeconds: 7,
+};
+
+const ASSET_LABELS = {
+  BTC: 'Bitcoin',
+  XRP: 'XRP',
+};
+
+const REC_CLASS = {
+  'Strong Buy': 'strong-buy',
+  Buy: 'buy',
+  Wait: 'wait',
+  Sell: 'sell',
+  'Strong Sell': 'strong-sell',
+};
+
+let pollTimer = null;
+let lastPrices = {};
+
+// ---------- settings persistence ----------
+
+function loadSettings() {
+  let engineUrl = localStorage.getItem('engineUrl') || DEFAULTS.engineUrl;
+  let refreshSeconds = parseInt(localStorage.getItem('refreshSeconds') || '', 10);
+  if (!refreshSeconds || refreshSeconds < 5 || refreshSeconds > 10) refreshSeconds = DEFAULTS.refreshSeconds;
+  return { engineUrl: engineUrl.replace(/\/+$/, ''), refreshSeconds };
+}
+
+function saveSettings(engineUrl, refreshSeconds) {
+  localStorage.setItem('engineUrl', engineUrl.replace(/\/+$/, ''));
+  localStorage.setItem('refreshSeconds', String(refreshSeconds));
+}
+
+// ---------- rendering ----------
+
+function ensurePanels() {
+  const grid = document.getElementById('main-grid');
+  if (grid.children.length > 0) return; // already built
+  const panelTpl = document.getElementById('asset-panel-template');
+  const windowTpl = document.getElementById('window-card-template');
+
+  for (const symbol of ['BTC', 'XRP']) {
+    const panel = panelTpl.content.firstElementChild.cloneNode(true);
+    panel.dataset.symbol = symbol;
+    panel.querySelector('.asset-symbol').textContent = symbol;
+    panel.querySelector('.asset-name').textContent = ASSET_LABELS[symbol] || symbol;
+
+    const row = panel.querySelector('.windows-row');
+    for (let i = 0; i < 3; i++) {
+      const card = windowTpl.content.firstElementChild.cloneNode(true);
+      row.appendChild(card);
+    }
+    grid.appendChild(panel);
+  }
+}
+
+function formatPrice(v, symbol) {
+  if (v == null) return '—';
+  const decimals = symbol === 'XRP' ? 4 : 2;
+  return v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+function renderAsset(symbol, assetData) {
+  const panel = document.querySelector(`.asset-panel[data-symbol="${symbol}"]`);
+  if (!panel || !assetData) return;
+
+  const priceEl = panel.querySelector('.asset-price');
+  const changeEl = panel.querySelector('.asset-price-change');
+  const price = assetData.price;
+  priceEl.textContent = price != null ? `$${formatPrice(price, symbol)}` : '—';
+
+  const prev = lastPrices[symbol];
+  if (prev != null && price != null) {
+    const diff = price - prev;
+    const pct = (diff / prev) * 100;
+    changeEl.textContent = `${diff >= 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(3)}%`;
+    changeEl.className = 'asset-price-change ' + (diff >= 0 ? 'up' : 'down');
+  }
+  if (price != null) lastPrices[symbol] = price;
+
+  if (!assetData.ready) {
+    const patternEl = panel.querySelector('.meta-pattern');
+    if (patternEl) patternEl.textContent = 'Seeding history…';
+    return;
+  }
+
+  const snap = assetData.indicatorsSnapshot;
+  panel.querySelector('.meta-rsi').textContent = snap.rsi != null ? snap.rsi.toFixed(0) : '—';
+  panel.querySelector('.meta-macd').textContent = snap.macdHistogram != null ? snap.macdHistogram.toFixed(3) : '—';
+  panel.querySelector('.meta-vol').textContent = snap.volatilityPct != null ? `${snap.volatilityPct.toFixed(2)}%` : '—';
+  panel.querySelector('.meta-flow').textContent =
+    snap.orderBookImbalance != null ? `${(snap.orderBookImbalance * 100).toFixed(0)}%` : '—';
+  panel.querySelector('.meta-pattern').textContent = snap.candlePattern || '—';
+
+  const cards = panel.querySelectorAll('.window-card');
+  const windowKeys = ['w5', 'w10', 'w15'];
+  windowKeys.forEach((key, i) => {
+    const w = assetData.windows[key];
+    const card = cards[i];
+    if (!w || !card) return;
+
+    card.querySelector('.window-label').textContent = w.window;
+    const recEl = card.querySelector('.window-rec');
+    recEl.textContent = w.recommendation;
+    recEl.className = 'window-rec ' + (REC_CLASS[w.recommendation] || 'wait');
+
+    card.querySelector('.prob-up').style.width = `${w.probabilityUp}%`;
+    card.querySelector('.prob-down').style.width = `${w.probabilityDown}%`;
+    card.querySelector('.prob-up-text').textContent = `UP ${w.probabilityUp}%`;
+    card.querySelector('.prob-down-text').textContent = `DOWN ${w.probabilityDown}%`;
+
+    card.querySelector('.predicted-price').textContent = `$${formatPrice(w.predictedPrice, symbol)}`;
+    card.querySelector('.confidence-value').textContent = `${w.confidence}%`;
+    card.querySelector('.risk-value').textContent = `${w.riskAdjustmentPct}%`;
+    card.querySelector('.window-explanation').textContent = w.explanation;
+
+    // Reference price + live countdown to when this window's prediction settles
+    if (w.tracking) {
+      card.querySelector('.ref-price').textContent = `$${formatPrice(w.tracking.baselinePrice, symbol)}`;
+      card.dataset.targetTime = String(w.tracking.targetTime);
+      updateCountdownEl(card);
+    }
+
+    // Most recent settled result for this window, if any
+    const resultBox = card.querySelector('.track-result');
+    if (w.lastResult) {
+      resultBox.classList.remove('hidden');
+      const badge = resultBox.querySelector('.result-badge');
+      const text = resultBox.querySelector('.result-text');
+      badge.textContent = w.lastResult.correct ? 'CORRECT' : 'MISSED';
+      badge.className = 'result-badge ' + (w.lastResult.correct ? 'win' : 'loss');
+      const dir = w.lastResult.actualDirection;
+      const pct = w.lastResult.changePct;
+      text.textContent = `Last settled: went ${dir} ${Math.abs(pct).toFixed(3)}% (predicted ${w.lastResult.predictedDirection})`;
+    } else {
+      resultBox.classList.add('hidden');
+    }
+
+    // Rolling accuracy for this asset/window pair
+    const accEl = card.querySelector('.accuracy-value');
+    if (w.accuracy && w.accuracy.sampleSize > 0) {
+      accEl.textContent = `${w.accuracy.correctCount}/${w.accuracy.sampleSize} correct (${w.accuracy.accuracyPct}%)`;
+    } else {
+      accEl.textContent = 'No settled predictions yet';
+    }
+  });
+}
+
+function updateCountdownEl(card) {
+  const el = card.querySelector('.countdown-value');
+  const target = parseInt(card.dataset.targetTime || '0', 10);
+  if (!target) {
+    el.textContent = '—';
+    return;
+  }
+  const remainingMs = target - Date.now();
+  if (remainingMs <= 0) {
+    el.textContent = 'Settling…';
+    el.classList.add('settling');
+    return;
+  }
+  el.classList.remove('settling');
+  const totalSeconds = Math.round(remainingMs / 1000);
+  const mm = Math.floor(totalSeconds / 60);
+  const ss = totalSeconds % 60;
+  el.textContent = `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
+function tickAllCountdowns() {
+  document.querySelectorAll('.window-card').forEach(updateCountdownEl);
+}
+
+function setStatus(state, text) {
+  const dot = document.getElementById('status-dot');
+  const label = document.getElementById('status-text');
+  dot.className = 'status-dot ' + (state === 'live' ? 'live' : state === 'down' ? 'down' : '');
+  label.textContent = text;
+}
+
+function renderCorrelation(value) {
+  const el = document.getElementById('corr-value');
+  el.textContent = value != null ? `${value}%` : '—';
+}
+
+function renderUpdatedTime() {
+  const el = document.getElementById('updated-text');
+  const now = new Date();
+  el.textContent = `Updated ${now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+}
+
+// ---------- polling ----------
+
+async function fetchLatest() {
+  const { engineUrl } = loadSettings();
+  try {
+    const res = await fetch(`${engineUrl}/api/latest`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    if (data.message && !data.BTC) {
+      setStatus('wait', data.message);
+      return;
+    }
+
+    ensurePanels();
+    renderAsset('BTC', data.BTC);
+    renderAsset('XRP', data.XRP);
+    renderCorrelation(data.correlation);
+    renderUpdatedTime();
+    setStatus('live', 'Live');
+  } catch (err) {
+    setStatus('down', 'Connection lost — retrying…');
+    console.error('[dashboard] fetch failed:', err.message);
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  const { refreshSeconds } = loadSettings();
+  fetchLatest();
+  pollTimer = setInterval(fetchLatest, refreshSeconds * 1000);
+}
+
+// ---------- settings overlay ----------
+
+function openSettings() {
+  const { engineUrl, refreshSeconds } = loadSettings();
+  document.getElementById('engine-url').value = engineUrl;
+  document.getElementById('refresh-interval').value = refreshSeconds;
+  document.getElementById('settings-overlay').classList.remove('hidden');
+}
+
+function closeSettings() {
+  document.getElementById('settings-overlay').classList.add('hidden');
+}
+
+function wireSettingsUI() {
+  document.getElementById('settings-btn').addEventListener('click', openSettings);
+  document.getElementById('settings-cancel').addEventListener('click', closeSettings);
+  document.getElementById('settings-save').addEventListener('click', () => {
+    const url = document.getElementById('engine-url').value.trim() || DEFAULTS.engineUrl;
+    let refresh = parseInt(document.getElementById('refresh-interval').value, 10);
+    if (!refresh || refresh < 5) refresh = 5;
+    if (refresh > 10) refresh = 10;
+    saveSettings(url, refresh);
+    closeSettings();
+    startPolling();
+  });
+}
+
+// ---------- bot overlay: live status, editable settings, backtest ----------
+
+function openBotOverlay() {
+  document.getElementById('bot-overlay').classList.remove('hidden');
+  refreshBotStatus();
+  loadBotConfigIntoForm();
+}
+
+function closeBotOverlay() {
+  document.getElementById('bot-overlay').classList.add('hidden');
+}
+
+async function refreshBotStatus() {
+  const { engineUrl } = loadSettings();
+  const modeLine = document.getElementById('bot-mode-line');
+  const body = document.getElementById('bot-status-body');
+  try {
+    const res = await fetch(`${engineUrl}/api/bot/status`, { cache: 'no-store' });
+    const data = await res.json();
+    if (!data.enabled) {
+      modeLine.textContent = data.message || 'Bot is not enabled on the engine.';
+      body.innerHTML = '';
+      return;
+    }
+    const mode = data.config.mode;
+    modeLine.textContent = `Mode: ${mode === 'live' ? 'LIVE (real orders)' : 'Paper (simulated)'} · Trading ${data.config.symbol}`;
+
+    const chips = [];
+    const open = data.openTrades && data.openTrades[0];
+    chips.push(chip('Open position', open ? `${open.symbol} ${open.side.toUpperCase()} @ ${open.entryPriceCents}¢` : 'None'));
+    chips.push(chip('Attempts', data.stats.totalAttempts));
+    chips.push(chip('Settled', data.stats.totalTrades));
+    chips.push(chip('Win rate', data.stats.winRatePct != null ? `${data.stats.winRatePct}%` : '—'));
+    chips.push(chip('Current streak', `${data.stats.currentWinStreak} win${data.stats.currentWinStreak === 1 ? '' : 's'}`));
+    chips.push(chip('Best streak', `${data.stats.longestWinStreak} win${data.stats.longestWinStreak === 1 ? '' : 's'}`));
+    chips.push(chip('Net P&L', `$${(data.stats.netPnlCents / 100).toFixed(2)}`, data.stats.netPnlCents >= 0 ? 'up' : 'down'));
+    chips.push(chip('Reserved (skimmed)', `$${(data.stats.reserveCents / 100).toFixed(2)}`, 'up'));
+    if (data.lastError) chips.push(chip('Last error', data.lastError));
+    body.innerHTML = chips.join('');
+  } catch (err) {
+    modeLine.textContent = 'Could not reach the engine to check bot status.';
+    body.innerHTML = '';
+  }
+}
+
+function chip(label, value, colorClass) {
+  const cls = colorClass ? (colorClass === 'up' ? 'chip-positive' : 'chip-negative') : '';
+  return `<div class="bot-stat-chip"><span class="stat-label">${label}</span><span class="stat-value${cls ? ' ' + cls : ''}">${value}</span></div>`;
+}
+
+async function loadBotConfigIntoForm() {
+  const { engineUrl } = loadSettings();
+  try {
+    const res = await fetch(`${engineUrl}/api/bot/config`, { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const c = data.config;
+    document.getElementById('bot-symbol').value = c.symbol;
+    document.getElementById('bot-edge').value = c.edgeThresholdPct;
+    document.getElementById('bot-confidence').value = c.minConfidence;
+    document.getElementById('bot-stoploss').value = c.stopLossCents;
+    document.getElementById('bot-contracts').value = c.contractsPerTrade;
+    document.getElementById('bot-maxpos').value = c.maxOpenPositions;
+    document.getElementById('bot-skim-mode').value = c.skimMode;
+    document.getElementById('bot-skim-amount').value = c.skimMode === 'percent' ? c.skimPercent : c.skimFixedCents;
+  } catch {
+    // Bot likely disabled or engine unreachable — form just stays blank.
+  }
+}
+
+async function saveBotConfig() {
+  const { engineUrl } = loadSettings();
+  const skimMode = document.getElementById('bot-skim-mode').value;
+  const skimAmount = parseFloat(document.getElementById('bot-skim-amount').value);
+  const payload = {
+    symbol: document.getElementById('bot-symbol').value,
+    edgeThresholdPct: parseFloat(document.getElementById('bot-edge').value),
+    minConfidence: parseFloat(document.getElementById('bot-confidence').value),
+    stopLossCents: parseFloat(document.getElementById('bot-stoploss').value),
+    contractsPerTrade: parseFloat(document.getElementById('bot-contracts').value),
+    maxOpenPositions: parseFloat(document.getElementById('bot-maxpos').value),
+    skimMode,
+    ...(skimMode === 'percent' ? { skimPercent: skimAmount } : { skimFixedCents: skimAmount }),
+  };
+  try {
+    await fetch(`${engineUrl}/api/bot/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    refreshBotStatus();
+  } catch (err) {
+    console.error('[dashboard] failed to save bot config:', err.message);
+  }
+}
+
+async function runBacktest() {
+  const { engineUrl } = loadSettings();
+  const symbol = document.getElementById('backtest-symbol').value;
+  const hours = document.getElementById('backtest-hours').value || 24;
+  const resultsEl = document.getElementById('backtest-results');
+  resultsEl.innerHTML = '<p class="settings-hint">Running — this fetches historical data and replays every minute, so it can take a little while for longer ranges…</p>';
+  try {
+    const res = await fetch(`${engineUrl}/api/backtest?symbol=${symbol}&hours=${hours}`, { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) {
+      resultsEl.innerHTML = `<p class="settings-hint">Error: ${data.error || 'unknown error'}</p>`;
+      return;
+    }
+    const rows = Object.values(data.windows)
+      .map(
+        (w) =>
+          `<div class="backtest-row"><span>${w.window}</span><span>${w.accuracyPct != null ? w.accuracyPct + '%' : '—'} (${w.correctCount}/${w.sampleSize})</span></div>`
+      )
+      .join('');
+    resultsEl.innerHTML = `${rows}<p class="backtest-note">${data.candleCount} candles over ${data.hoursRequested}h. ${data.note}</p>`;
+  } catch (err) {
+    resultsEl.innerHTML = `<p class="settings-hint">Failed to run backtest: ${err.message}</p>`;
+  }
+}
+
+function wireBotUI() {
+  document.getElementById('bot-btn').addEventListener('click', openBotOverlay);
+  document.getElementById('bot-overlay-close').addEventListener('click', closeBotOverlay);
+  document.getElementById('bot-settings-refresh').addEventListener('click', () => {
+    refreshBotStatus();
+    loadBotConfigIntoForm();
+  });
+  document.getElementById('bot-settings-save').addEventListener('click', saveBotConfig);
+  document.getElementById('backtest-run').addEventListener('click', runBacktest);
+}
+
+// ---------- misc: wake lock, orientation, service worker ----------
+
+let wakeLock = null;
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  } catch (err) {
+    // Non-fatal — some browsers/OS power modes reject this.
+    console.warn('[dashboard] wake lock unavailable:', err.message);
+  }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock();
+});
+
+async function tryLockLandscape() {
+  try {
+    if (screen.orientation && screen.orientation.lock) {
+      await screen.orientation.lock('landscape');
+    }
+  } catch {
+    // Only works in installed/fullscreen PWA context on Android; ignore otherwise.
+  }
+}
+
+function registerServiceWorker() {
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch((err) => {
+      console.warn('[dashboard] service worker registration failed:', err.message);
+    });
+  }
+}
+
+// ---------- boot ----------
+
+window.addEventListener('DOMContentLoaded', () => {
+  ensurePanels();
+  wireSettingsUI();
+  wireBotUI();
+  registerServiceWorker();
+  requestWakeLock();
+  tryLockLandscape();
+  startPolling();
+  setInterval(tickAllCountdowns, 1000);
+
+  // If this is the very first run, nudge the user to set the engine address.
+  if (!localStorage.getItem('engineUrl')) {
+    openSettings();
+  }
+});
